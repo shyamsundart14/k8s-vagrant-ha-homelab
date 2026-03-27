@@ -197,3 +197,47 @@ Mac → jump (only direct SSH target)
 - Mac `/etc/hosts` only has `jump` and `vault` (for browser access)
 - All ansible playbooks run ON the jump server
 - `kubectl` runs from jump server
+
+## Troubleshooting
+
+### "Host key verification failed" after recreating VMs
+
+When VMs are destroyed and recreated, they generate new SSH host keys. Stale keys cached on your Mac will cause SSH (and Ansible) to reject the connection.
+
+**Before re-running the script or playbook**, clean up stale SSH state:
+
+```bash
+# Remove cached host keys for all VM IPs
+for ip in 10 11 12 21 22 23 31 32 41 42 43; do
+  ssh-keygen -R "192.168.105.${ip}" 2>/dev/null
+done
+ssh-keygen -R jump 2>/dev/null
+
+# Remove stale Ansible SSH control sockets
+rm -rf ~/.ansible/cp/
+
+# (Optional) Remove SSH config entries if the block was duplicated
+# Check with: grep -c "Host jump" ~/.ssh/config
+```
+
+The deploy script handles this automatically, but if you run the Ansible playbook directly, you may need to do this manually.
+
+### Duplicate `Host jump` entries in `~/.ssh/config`
+
+Both the HA and simple projects add a `Host jump` block to `~/.ssh/config`. If you run both, you'll get duplicates. SSH uses the **first** match, so it still works, but to keep it clean:
+
+```bash
+# Check for duplicates
+grep -c "Host jump" ~/.ssh/config
+
+# Edit manually if needed
+vi ~/.ssh/config
+```
+
+### VM is "running" but unreachable
+
+If `vagrant status` shows `running` but `ssh jump` fails with "No route to host":
+
+1. Check if `bridge100` interface exists on Mac: `ifconfig bridge100`
+2. Restart socket_vmnet: `sudo brew services restart socket_vmnet`
+3. Reprovision the VM: `vagrant provision jump`
