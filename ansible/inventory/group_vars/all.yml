@@ -1,0 +1,62 @@
+---
+# =============================================================================
+# Network Configuration — Single Source of Truth
+# =============================================================================
+# Auto-detected from socket_vmnet by deploy.sh / setup.sh.
+# All roles and playbooks derive IPs from network_prefix + suffix.
+#
+# To change manually:
+#   1. Update network_prefix below
+#   2. Everything else (Vagrantfile, roles, playbooks) reads from here
+#
+# socket_vmnet plist: /Library/LaunchDaemons/homebrew.mxcl.socket_vmnet.plist
+# =============================================================================
+
+network_prefix: "192.168.105"
+
+# ---- Derived VM IPs (suffix matches Vagrantfile) ----
+haproxy_ip: "{{ network_prefix }}.10"
+vault_ip: "{{ network_prefix }}.11"
+jump_ip: "{{ network_prefix }}.12"
+
+# etcd cluster
+etcd_cluster_members:
+  - { name: "etcd-1", ip: "{{ network_prefix }}.21" }
+  - { name: "etcd-2", ip: "{{ network_prefix }}.22" }
+  - { name: "etcd-3", ip: "{{ network_prefix }}.23" }
+
+# K8s masters (used by haproxy + certs)
+master_nodes:
+  - { name: "master-1", ip: "{{ network_prefix }}.31" }
+  - { name: "master-2", ip: "{{ network_prefix }}.32" }
+
+# Cert role IP maps
+master_ips:
+  master-1: "{{ network_prefix }}.31"
+  master-2: "{{ network_prefix }}.32"
+
+worker_ips:
+  worker-1: "{{ network_prefix }}.41"
+  worker-2: "{{ network_prefix }}.42"
+  worker-3: "{{ network_prefix }}.43"
+
+etcd_ips:
+  etcd-1: "{{ network_prefix }}.21"
+  etcd-2: "{{ network_prefix }}.22"
+  etcd-3: "{{ network_prefix }}.23"
+
+# Jump server / SSH
+jump_host_ip: "{{ network_prefix }}.12"
+
+# Network prefix for VM SSH config generation
+vm_definitions:
+  - { name: "haproxy",  ip_suffix: 10 }
+  - { name: "vault",    ip_suffix: 11 }
+  - { name: "etcd-1",   ip_suffix: 21 }
+  - { name: "etcd-2",   ip_suffix: 22 }
+  - { name: "etcd-3",   ip_suffix: 23 }
+  - { name: "master-1", ip_suffix: 31 }
+  - { name: "master-2", ip_suffix: 32 }
+  - { name: "worker-1", ip_suffix: 41 }
+  - { name: "worker-2", ip_suffix: 42 }
+  - { name: "worker-3", ip_suffix: 43 }

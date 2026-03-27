@@ -1,0 +1,566 @@
+---
+# =============================================================================
+# Vagrant Lab — Full Cluster Deployment Playbook
+# =============================================================================
+# Bastion architecture: Mac connects ONLY to jump server.
+# All cluster playbooks run ON the jump server.
+#
+# Usage (run from Mac):
+#   cd ansible
+#   ansible-playbook -i inventory/localhost.yml playbooks/deploy.yml --ask-become-pass
+#
+# Architecture:
+#   Phase 1: Mac localhost — Mac setup, download binaries
+#   Phase 2: Mac → jump   — configure jump, copy project + binaries
+#   Phase 3: ON jump      — run all cluster playbooks via shell
+#
+# Prerequisites:
+#   - vagrant up (all 11 VMs running)
+#   - ./setup.sh (roles symlink, SSH key)
+# =============================================================================
+
+# =============================================================================
+# Pre-flight: Cache sudo credentials early (avoids mid-deploy prompts)
+# =============================================================================
+
+- name: "Pre-flight: Cache sudo credentials"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Check if jump host entry already exists in /etc/hosts
+      ansible.builtin.shell: grep -q '{{ network_prefix }}.12[[:space:]]*jump' /etc/hosts 2>/dev/null
+      register: hosts_check
+      changed_when: false
+      failed_when: false
+
+    - name: Cache sudo credentials early (will prompt once now instead of mid-deploy)
+      ansible.builtin.command: "true"
+      become: true
+      changed_when: false
+      when: hosts_check.rc != 0
+
+    - name: Sudo not needed (jump host entry already in /etc/hosts)
+      ansible.builtin.debug:
+        msg: "/etc/hosts already has jump entry — no sudo prompt needed"
+      when: hosts_check.rc == 0
+
+# =============================================================================
+# Pre-flight: Kill stale QEMU + check port availability
+# =============================================================================
+
+- name: "Pre-flight: Port cleanup and QEMU check"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    vm_ports:
+      - { name: haproxy,  port: 51010 }
+      - { name: vault,    port: 51011 }
+      - { name: jump,     port: 51012 }
+      - { name: etcd-1,   port: 51021 }
+      - { name: etcd-2,   port: 51022 }
+      - { name: etcd-3,   port: 51023 }
+      - { name: master-1, port: 51031 }
+      - { name: master-2, port: 51032 }
+      - { name: worker-1, port: 51041 }
+      - { name: worker-2, port: 51042 }
+      - { name: worker-3, port: 51043 }
+
+  tasks:
+    - name: Kill stale QEMU processes from previous runs
+      ansible.builtin.shell: |
+        pkill -f "qemu-system.*vagrant" 2>/dev/null || true
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for QEMU processes to terminate
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: Check each required port is free
+      ansible.builtin.shell: |
+        netstat -an 2>/dev/null | grep -E '\.{{ item.port }}\b.*(LISTEN|ESTABLISHED)' && echo "BLOCKED" || echo "FREE"
+      register: port_checks
+      loop: "{{ vm_ports }}"
+      loop_control:
+        label: "{{ item.name }} (port {{ item.port }})"
+      changed_when: false
+
+    - name: Identify blocked ports
+      ansible.builtin.set_fact:
+        blocked_ports: "{{ port_checks.results | selectattr('stdout', 'search', 'BLOCKED') | map(attribute='item') | list }}"
+
+    - name: Raise macOS ephemeral port floor if ports are blocked
+      ansible.builtin.command: sysctl -w net.inet.ip.portrange.first=51044
+      become: true
+      when: blocked_ports | length > 0
+      changed_when: true
+
+    - name: Wait for blocked connections to drop
+      ansible.builtin.pause:
+        seconds: 10
+      when: blocked_ports | length > 0
+
+    - name: Re-check previously blocked ports
+      ansible.builtin.shell: |
+        netstat -an 2>/dev/null | grep -E '\.{{ item.port }}\b.*(LISTEN|ESTABLISHED)' && echo "BLOCKED" || echo "FREE"
+      register: recheck_ports
+      loop: "{{ blocked_ports }}"
+      loop_control:
+        label: "{{ item.name }} (port {{ item.port }})"
+      changed_when: false
+      when: blocked_ports | length > 0
+
+    - name: Fail if ports are still blocked
+      ansible.builtin.fail:
+        msg: >-
+          Ports still in use: {{ recheck_ports.results | selectattr('stdout', 'search', 'BLOCKED')
+          | map(attribute='item.port') | list | join(', ') }}.
+          Close apps using these ports or wait and retry.
+      when:
+        - blocked_ports | length > 0
+        - recheck_ports.results | selectattr('stdout', 'search', 'BLOCKED') | list | length > 0
+
+    - name: All ports are free
+      ansible.builtin.debug:
+        msg: "All {{ vm_ports | length }} QEMU SSH ports are free"
+
+# =============================================================================
+# Phase 1: Mac Localhost — Setup + Download Binaries
+# =============================================================================
+
+# --- Start vagrant up in background ---
+- name: "Phase 1: Start vagrant up (background)"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Check if VMs are already running
+      ansible.builtin.shell: |
+        cd {{ playbook_dir }}/../.. && vagrant status 2>/dev/null | grep -c 'running' || echo 0
+      register: running_vms
+      changed_when: false
+
+    - name: Start vagrant up (async — runs in background)
+      ansible.builtin.shell: |
+        cd {{ playbook_dir }}/../.. && vagrant up --no-destroy-on-error
+      async: 900
+      poll: 0
+      register: vagrant_async
+      when: (running_vms.stdout | int) < 11
+
+    - name: VMs already running — skipping vagrant up
+      ansible.builtin.debug:
+        msg: "All 11 VMs already running"
+      when: (running_vms.stdout | int) >= 11
+
+# --- Configure Mac /etc/hosts + SSH config (while vagrant up runs) ---
+- name: "Phase 1: Configure Mac host"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Add jump + vault to Mac /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} K8s Vagrant Homelab"
+        block: |
+          {{ network_prefix }}.11  vault
+          {{ network_prefix }}.12  jump
+      become: true
+
+    - name: Add jump server to Mac SSH config
+      ansible.builtin.blockinfile:
+        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
+        marker: "# K8s Vagrant Homelab {mark}"
+        block: |
+          Host jump
+              HostName {{ network_prefix }}.12
+              User k8s
+              IdentityFile ~/.ssh/k8slab.key
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+              LogLevel ERROR
+              PreferredAuthentications publickey
+        create: true
+        mode: '0600'
+
+# --- Download K8s binaries to Mac cache ---
+- name: "Phase 1: Download K8s binaries to Mac"
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars_files:
+    - ../roles/download-binaries/vars/main.yml
+
+  roles:
+    - role: ../roles/download-binaries
+
+# --- Wait for vagrant up to finish, then wait for jump SSH ---
+- name: "Phase 1: Wait for VMs + jump server SSH"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Wait for vagrant up to complete
+      ansible.builtin.async_status:
+        jid: "{{ vagrant_async.ansible_job_id }}"
+      register: vagrant_result
+      until: vagrant_result.finished
+      retries: 40
+      delay: 30
+      failed_when: false
+      when: vagrant_async is defined and vagrant_async.ansible_job_id is defined
+
+    - name: Check which VMs are not running after initial vagrant up
+      ansible.builtin.shell: |
+        cd {{ playbook_dir }}/../.. && vagrant status 2>/dev/null | grep -v 'running' | grep -oE '^[a-z][-a-z0-9]+' | head -11
+      register: failed_vms
+      changed_when: false
+      when: vagrant_result is defined and vagrant_result.rc is defined and vagrant_result.rc != 0
+
+    - name: Retry boot for failed VMs
+      ansible.builtin.shell: |
+        cd {{ playbook_dir }}/../.. && vagrant up {{ failed_vms.stdout_lines | join(' ') }} --no-destroy-on-error
+      register: retry_result
+      retries: 2
+      delay: 10
+      until: retry_result.rc == 0
+      when: failed_vms.stdout_lines | default([]) | length > 0
+
+    - name: Vagrant up completed
+      ansible.builtin.debug:
+        msg: "All VMs created and provisioned"
+      when: vagrant_async is defined and vagrant_async.ansible_job_id is defined
+
+    - name: Wait for jump server SSH to be reachable
+      ansible.builtin.wait_for:
+        host: "{{ network_prefix }}.12"
+        port: 22
+        timeout: 300
+        delay: 5
+
+    - name: Remove stale SSH host keys for all VMs (new keys after vagrant up)
+      ansible.builtin.known_hosts:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ network_prefix }}.10"
+        - "{{ network_prefix }}.11"
+        - "{{ network_prefix }}.12"
+        - jump
+      failed_when: false
+
+# =============================================================================
+# Phase 2: Configure Jump Server (Mac → jump only)
+# =============================================================================
+
+- name: "Phase 2: Configure jump server + copy project"
+  hosts: jump_servers
+  gather_facts: true
+  vars_files:
+    - ../roles/download-binaries/vars/main.yml
+  vars:
+    project_dir_jump: ~/vagrant-lab
+
+  tasks:
+    # --- Fix permissions ---
+    - name: Fix home directory ownership
+      ansible.builtin.file:
+        path: /home/k8s
+        owner: k8s
+        group: k8s
+        recurse: true
+      become: true
+
+    # --- SSH setup ---
+    - name: Ensure .ssh directory exists
+      ansible.builtin.file:
+        path: ~/.ssh
+        state: directory
+        mode: '0700'
+
+    - name: Copy SSH private key to jump
+      ansible.builtin.copy:
+        src: "{{ lookup('env', 'HOME') }}/.ssh/k8slab.key"
+        dest: ~/.ssh/k8slab.key
+        mode: '0600'
+
+    - name: Create SSH config for all VMs
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/jump-setup/templates/jump-ssh-config.j2"
+        dest: ~/.ssh/config
+        mode: '0600'
+
+    # --- Copy project to jump ---
+    - name: Create project directory on jump
+      ansible.builtin.file:
+        path: "{{ project_dir_jump }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy ansible directory to jump
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../"
+        dest: "{{ project_dir_jump }}/ansible/"
+        rsync_opts:
+          - "--exclude=.vault-credentials"
+          - "--exclude=fact_cache"
+
+    # --- Copy binaries to jump ---
+    - name: Include binary copy tasks
+      ansible.builtin.include_tasks: ../roles/download-binaries/tasks/copy_to_jump.yml
+
+    # --- Wait for Ansible to be installed (cloud-init) ---
+    - name: Wait for ansible-playbook to be available
+      ansible.builtin.command:
+        cmd: which ansible-playbook
+      register: ansible_check
+      retries: 24
+      delay: 5
+      until: ansible_check.rc == 0
+      changed_when: false
+
+    # --- Install Python dependencies (jmespath needed for json_query filter) ---
+    - name: Install jmespath Python package
+      ansible.builtin.pip:
+        name: jmespath
+        state: present
+        extra_args: --break-system-packages
+
+    # --- Install Ansible collections ---
+    - name: Install required Ansible collections
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection install community.hashi_vault ansible.posix
+      changed_when: false
+
+    # --- Vault environment ---
+    - name: Setup Vault environment in .bashrc
+      ansible.builtin.blockinfile:
+        path: ~/.bashrc
+        marker: "# {mark} VAULT ENVIRONMENT"
+        block: |
+          export VAULT_ADDR="http://vault:8200"
+          export VAULT_TOKEN=$(jq -r .root_token ~/vagrant-lab/ansible/.vault-credentials/vault-init.json 2>/dev/null)
+
+          vault-unseal() {
+              echo "Unsealing Vault..."
+              local creds="$HOME/vagrant-lab/ansible/.vault-credentials/vault-init.json"
+              if [[ ! -f "$creds" ]]; then echo "Error: $creds not found"; return 1; fi
+              for key in $(jq -r '.keys[:3][]' "$creds"); do
+                  vault operator unseal "$key"
+              done
+              echo "Done. Check: vault status"
+          }
+        create: true
+        mode: '0644'
+
+    - name: Create .profile to source .bashrc
+      ansible.builtin.copy:
+        content: |
+          if [ -n "$BASH_VERSION" ]; then
+              if [ -f "$HOME/.bashrc" ]; then
+                  . "$HOME/.bashrc"
+              fi
+          fi
+        dest: ~/.profile
+        mode: '0644'
+        force: false
+
+    # --- Test connectivity from jump to all VMs ---
+    - name: Test connectivity to all VMs from jump
+      ansible.builtin.command:
+        cmd: "ssh -o ConnectTimeout=5 -o BatchMode=yes {{ item.name }} echo ok"
+      loop: "{{ vm_definitions }}"
+      register: connectivity_results
+      failed_when: false
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: connectivity_results.rc == 0
+
+    - name: Display connectivity results
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }}: {{ 'OK' if item.rc == 0 else 'FAILED' }}"
+      loop: "{{ connectivity_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Jump server fully ready
+      ansible.builtin.debug:
+        msg: "Jump configured, binaries copied, ansible available — ready to deploy cluster"
+
+# =============================================================================
+# Phase 3: Deploy K8s Cluster (ALL playbooks run ON the jump server)
+# =============================================================================
+
+- name: "Phase 3: Deploy cluster from jump server"
+  hosts: jump_servers
+  gather_facts: false
+  vars:
+    ansible_dir: ~/vagrant-lab/ansible
+    playbook_cmd: "cd {{ ansible_dir }} && ansible-playbook -i inventory/homelab.yml"
+
+  tasks:
+    # --- Step 1: Vault Full Setup (bootstrap + PKI) ---
+    - name: "Step 1: Run vault-full-setup.yml on jump"
+      ansible.builtin.shell: |
+        {{ playbook_cmd }} playbooks/vault-full-setup.yml
+      args:
+        creates: "{{ ansible_dir }}/.vault-credentials/vault-init.json"
+      register: vault_setup
+
+    - name: Display vault setup result
+      ansible.builtin.debug:
+        msg: "{{ vault_setup.stdout_lines[-5:] }}"
+      when: vault_setup is changed
+
+    # --- Step 2: Issue & deploy K8s certificates ---
+    - name: "Step 2: Run k8s-certs.yml on jump"
+      ansible.builtin.shell: |
+        {{ playbook_cmd }} playbooks/k8s-certs.yml
+      register: certs_result
+
+    - name: Display certs result
+      ansible.builtin.debug:
+        msg: "{{ certs_result.stdout_lines[-3:] }}"
+
+    # --- Step 3: Deploy etcd + HAProxy in PARALLEL ---
+    - name: "Step 3: Run etcd-cluster.yml on jump (async)"
+      ansible.builtin.shell: |
+        {{ playbook_cmd }} playbooks/etcd-cluster.yml
+      async: 600
+      poll: 0
+      register: etcd_async
+
+    - name: "Step 3: Run haproxy.yml on jump (async)"
+      ansible.builtin.shell: |
+        {{ playbook_cmd }} playbooks/haproxy.yml
+      async: 600
+      poll: 0
+      register: haproxy_async
+
+    - name: "Step 3: Wait for etcd deployment"
+      ansible.builtin.async_status:
+        jid: "{{ etcd_async.ansible_job_id }}"
+      register: etcd_result
+      until: etcd_result.finished
+      retries: 60
+      delay: 10
+
+    - name: "Step 3: Wait for haproxy deployment"
+      ansible.builtin.async_status:
+        jid: "{{ haproxy_async.ansible_job_id }}"
+      register: haproxy_result
+      until: haproxy_result.finished
+      retries: 60
+      delay: 10
+
+    - name: Display etcd result
+      ansible.builtin.debug:
+        msg: "{{ etcd_result.stdout_lines[-5:] }}"
+
+    - name: Display haproxy result
+      ansible.builtin.debug:
+        msg: "{{ haproxy_result.stdout_lines[-3:] }}"
+
+    # --- Step 4: Deploy Control Plane ---
+    - name: "Step 4: Run control-plane.yml on jump"
+      ansible.builtin.shell: |
+        {{ playbook_cmd }} playbooks/control-plane.yml
+      register: cp_result
+
+    - name: Display control plane result
+      ansible.builtin.debug:
+        msg: "{{ cp_result.stdout_lines[-3:] }}"
+
+    # --- Step 5: Deploy Worker Nodes ---
+    - name: "Step 5: Run worker.yml on jump"
+      ansible.builtin.shell: |
+        {{ playbook_cmd }} playbooks/worker.yml
+      register: worker_result
+
+    - name: Display worker result
+      ansible.builtin.debug:
+        msg: "{{ worker_result.stdout_lines[-5:] }}"
+
+    # --- Step 6: Install Calico CNI ---
+    - name: "Step 6: Patch Calico manifest for pod CIDR"
+      ansible.builtin.shell: |
+        sed -i 's|# - name: CALICO_IPV4POOL_CIDR|- name: CALICO_IPV4POOL_CIDR|; s|#   value: "192.168.0.0/16"|  value: "10.244.0.0/16"|' /tmp/calico.yaml
+      changed_when: true
+
+    - name: "Step 6: Apply Calico CNI"
+      ansible.builtin.command:
+        cmd: kubectl apply -f /tmp/calico.yaml
+      register: calico_apply
+      changed_when: "'created' in calico_apply.stdout or 'configured' in calico_apply.stdout"
+
+    - name: Wait for Calico to initialize
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Get cluster nodes
+      ansible.builtin.command:
+        cmd: kubectl get nodes -o wide
+      register: node_list
+      retries: 5
+      delay: 10
+      until: node_list.rc == 0
+      changed_when: false
+
+    - name: Display cluster status
+      ansible.builtin.debug:
+        var: node_list.stdout_lines
+
+# =============================================================================
+# Final Summary
+# =============================================================================
+- name: "Deployment Complete"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Show deployment summary
+      ansible.builtin.debug:
+        msg: |
+
+          ════════════════════════════════════════════════════════════
+          K8s Vagrant Homelab — Deployment Complete!
+          ════════════════════════════════════════════════════════════
+
+          Infrastructure:
+            HAProxy LB:     {{ network_prefix }}.10
+            Vault:          {{ network_prefix }}.11 (UI: http://{{ network_prefix }}.11:8200)
+            Jump/Bastion:   {{ network_prefix }}.12
+
+          etcd Cluster:
+            etcd-1:         {{ network_prefix }}.21
+            etcd-2:         {{ network_prefix }}.22
+            etcd-3:         {{ network_prefix }}.23
+
+          Control Plane:
+            master-1:       {{ network_prefix }}.31
+            master-2:       {{ network_prefix }}.32
+
+          Workers:
+            worker-1:       {{ network_prefix }}.41
+            worker-2:       {{ network_prefix }}.42
+            worker-3:       {{ network_prefix }}.43
+
+          Access:
+            SSH to jump:    ssh jump
+            From jump:      ssh master-1, ssh worker-1, etc.
+            kubectl:        ssh jump && kubectl get nodes
+
+          Vault:
+            Address:        http://vault:8200
+            Unseal:         ssh jump && vault-unseal
+          ════════════════════════════════════════════════════════════

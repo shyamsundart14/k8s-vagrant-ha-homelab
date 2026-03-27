@@ -1,0 +1,17 @@
+---
+# HAProxy configuration for K8s API server load balancing
+haproxy_version: "2.8"
+
+# Frontend
+apiserver_frontend_port: 6443
+
+# Backend - K8s master nodes
+apiserver_backend_port: 6443
+master_nodes:
+  - name: master-1
+    ip: "{{ network_prefix }}.31"
+  - name: master-2
+    ip: "{{ network_prefix }}.32"
+
+# HAProxy stats
+stats_port: 8404

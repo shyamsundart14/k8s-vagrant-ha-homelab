@@ -1,0 +1,112 @@
+---
+# =============================================================================
+# Worker Node Deployment Playbook (Vagrant version)
+# =============================================================================
+# Adapted for Mac-direct deployment: downloads kubectl to jump directly
+# instead of copying from the jump binary cache.
+#
+# Usage:
+#   ansible-playbook -i inventory/homelab.yml playbooks/worker.yml
+
+- name: Deploy Kubernetes Worker Nodes
+  hosts: k8s_workers
+  gather_facts: true
+  vars_files:
+    - ../roles/worker/vars/main.yml
+  roles:
+    - role: ../roles/worker
+
+- name: Deploy admin kubeconfig to jump server
+  hosts: jump_servers
+  gather_facts: true
+  vars:
+    k8s_cert_dir: "/etc/kubernetes/pki"
+    haproxy_ip: "{{ network_prefix }}.10"
+    apiserver_port: 6443
+    k8s_version: "1.32.0"
+  tasks:
+    - name: Create .kube directory
+      ansible.builtin.file:
+        path: ~/.kube
+        state: directory
+        mode: '0755'
+
+    - name: Fetch admin kubeconfig from master-1
+      ansible.builtin.slurp:
+        src: /etc/kubernetes/admin.kubeconfig
+      register: admin_kubeconfig
+      delegate_to: master-1
+      become: true
+
+    - name: Read CA cert from master-1
+      ansible.builtin.slurp:
+        src: "{{ k8s_cert_dir }}/ca.crt"
+      register: ca_cert
+      delegate_to: master-1
+      become: true
+
+    - name: Read admin cert from master-1
+      ansible.builtin.slurp:
+        src: "{{ k8s_cert_dir }}/admin.crt"
+      register: admin_cert
+      delegate_to: master-1
+      become: true
+
+    - name: Read admin key from master-1
+      ansible.builtin.slurp:
+        src: "{{ k8s_cert_dir }}/admin.key"
+      register: admin_key
+      delegate_to: master-1
+      become: true
+
+    - name: Create kubeconfig with embedded certs for jump server
+      ansible.builtin.copy:
+        content: |
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - cluster:
+              certificate-authority-data: {{ ca_cert.content }}
+              server: https://{{ haproxy_ip }}:{{ apiserver_port }}
+            name: kubernetes
+          contexts:
+          - context:
+              cluster: kubernetes
+              user: admin
+            name: default
+          current-context: default
+          users:
+          - name: admin
+            user:
+              client-certificate-data: {{ admin_cert.content }}
+              client-key-data: {{ admin_key.content }}
+        dest: ~/.kube/config
+        mode: '0600'
+
+    - name: Download kubectl to jump server
+      ansible.builtin.get_url:
+        url: "https://dl.k8s.io/release/v{{ k8s_version }}/bin/linux/arm64/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+      become: true
+
+- name: Validate cluster
+  hosts: jump_servers
+  gather_facts: false
+  tasks:
+    - name: Wait for nodes to register
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Get cluster nodes
+      ansible.builtin.command:
+        cmd: kubectl get nodes -o wide
+      register: node_list
+      retries: 5
+      delay: 10
+      until: node_list.rc == 0
+      changed_when: false
+
+    - name: Display nodes
+      ansible.builtin.debug:
+        var: node_list.stdout_lines

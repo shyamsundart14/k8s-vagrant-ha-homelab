@@ -1,0 +1,19 @@
+---
+# Test connectivity to all VMs
+# Usage: ansible-playbook -i inventory/homelab.yml playbooks/ping.yml
+
+- name: Test connectivity to all hosts
+  hosts: all:!localhost
+  gather_facts: false
+  tasks:
+    - name: Ping all hosts
+      ansible.builtin.ping:
+
+    - name: Get hostname
+      ansible.builtin.command: hostname
+      register: hostname_result
+      changed_when: false
+
+    - name: Display hostname
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} reports hostname: {{ hostname_result.stdout }}"

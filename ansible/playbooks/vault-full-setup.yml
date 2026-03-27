@@ -1,0 +1,50 @@
+---
+# =============================================================================
+# Vault Full Setup Playbook (bootstrap + PKI)
+# =============================================================================
+# Usage (standalone):
+#   ansible-playbook -i inventory/homelab.yml playbooks/vault-full-setup.yml
+# =============================================================================
+
+# --- Wait for Vault Server ---
+- name: Wait for vault server to be ready
+  hosts: vault_servers
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        delay: 5
+
+# --- Bootstrap Vault ---
+- name: Bootstrap HashiCorp Vault
+  hosts: vault_servers
+  gather_facts: true
+
+  roles:
+    - role: ../roles/vault-bootstrap
+
+  post_tasks:
+    - name: Vault bootstrap complete
+      ansible.builtin.debug:
+        msg: "Vault running at http://{{ inventory_hostname }}:8200"
+
+# --- Setup PKI Hierarchy ---
+- name: Setup Vault PKI for Kubernetes
+  hosts: localhost
+  gather_facts: false
+
+  pre_tasks:
+    - name: Read Vault token from credentials file
+      ansible.builtin.set_fact:
+        vault_token: "{{ lookup('file', playbook_dir + '/../.vault-credentials/vault-init.json') | from_json | json_query('root_token') }}"
+
+  roles:
+    - role: ../roles/vault-pki
+
+  post_tasks:
+    - name: PKI setup complete
+      ansible.builtin.debug:
+        msg: |
+          Vault PKI Hierarchy Created:
+            Root CA -> Intermediate CA -> kubernetes / etcd / front-proxy CAs

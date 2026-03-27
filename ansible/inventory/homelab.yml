@@ -1,0 +1,66 @@
+---
+# =============================================================================
+# Vagrant Lab Inventory — Used ON the jump server
+# =============================================================================
+# Hostnames resolve via /etc/hosts on each VM (set by Vagrant provisioner).
+# No ansible_host needed — jump connects to VMs by hostname.
+#
+# This inventory is copied to jump and used for all cluster playbooks.
+# Mac uses localhost.yml (only localhost + jump).
+# =============================================================================
+
+all:
+  vars:
+    ansible_user: k8s
+    ansible_ssh_private_key_file: ~/.ssh/k8slab.key
+    ansible_python_interpreter: /usr/bin/python3
+
+  children:
+    # Jump / Bastion
+    jump_servers:
+      hosts:
+        jump:
+
+    # Load Balancer
+    lb_servers:
+      hosts:
+        haproxy:
+
+    # HashiCorp Vault
+    vault_servers:
+      hosts:
+        vault:
+
+    # etcd Cluster
+    etcd_servers:
+      hosts:
+        etcd-1:
+        etcd-2:
+        etcd-3:
+
+    # Kubernetes Control Plane
+    k8s_masters:
+      hosts:
+        master-1:
+        master-2:
+
+    # Kubernetes Workers
+    k8s_workers:
+      hosts:
+        worker-1:
+        worker-2:
+        worker-3:
+
+    # Group: All K8s nodes
+    k8s_nodes:
+      children:
+        etcd_servers:
+        k8s_masters:
+        k8s_workers:
+
+    # Group: All infrastructure
+    infrastructure:
+      children:
+        jump_servers:
+        lb_servers:
+        vault_servers:

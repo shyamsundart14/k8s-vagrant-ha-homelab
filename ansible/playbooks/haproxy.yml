@@ -1,0 +1,40 @@
+---
+# =============================================================================
+# HAProxy Deployment Playbook
+# =============================================================================
+# Usage:
+#   ansible-playbook -i inventory/homelab.yml playbooks/haproxy.yml
+
+- name: Configure HAProxy for K8s API Server
+  hosts: lb_servers
+  gather_facts: true
+  vars_files:
+    - ../roles/haproxy/vars/main.yml
+  roles:
+    - role: ../roles/haproxy
+
+- name: Verify HAProxy
+  hosts: lb_servers
+  gather_facts: false
+  vars_files:
+    - ../roles/haproxy/vars/main.yml
+  tasks:
+    - name: Check haproxy is running
+      ansible.builtin.command:
+        cmd: systemctl is-active haproxy
+      register: haproxy_status
+      become: true
+
+    - name: Display haproxy status
+      ansible.builtin.debug:
+        msg: "HAProxy is {{ haproxy_status.stdout }}"
+
+    - name: Check haproxy is listening on port {{ apiserver_frontend_port }}
+      ansible.builtin.shell:
+        cmd: "ss -tlnp | grep {{ apiserver_frontend_port }}"
+      register: haproxy_listen
+      become: true
+
+    - name: Display listening ports
+      ansible.builtin.debug:
+        var: haproxy_listen.stdout_lines

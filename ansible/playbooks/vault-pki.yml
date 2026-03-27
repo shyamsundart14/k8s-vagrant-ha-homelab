@@ -1,0 +1,13 @@
+---
+# =============================================================================
+# Vault PKI Setup Playbook (standalone)
+# =============================================================================
+# Usage:
+#   export VAULT_TOKEN="hvs.xxxxx"
+#   ansible-playbook -i inventory/homelab.yml playbooks/vault-pki.yml
+
+- name: Setup Vault PKI for Kubernetes
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - role: ../roles/vault-pki

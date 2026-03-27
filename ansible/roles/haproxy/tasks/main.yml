@@ -1,0 +1,39 @@
+---
+# HAProxy setup for Kubernetes API server load balancing
+
+- name: Wait for apt lock to be released
+  ansible.builtin.shell: |
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
+  become: true
+  changed_when: false
+
+- name: Ensure haproxy is installed
+  ansible.builtin.apt:
+    name: haproxy
+    state: present
+  become: true
+
+- name: Deploy haproxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    mode: '0644'
+    validate: haproxy -c -f %s
+  notify:
+    - Restart haproxy
+  become: true
+
+- name: Restart haproxy to pick up new config
+  ansible.builtin.systemd:
+    name: haproxy
+    state: restarted
+    enabled: true
+    daemon_reload: true
+  become: true
+
+- name: Wait for haproxy to be ready
+  ansible.builtin.wait_for:
+    port: "{{ apiserver_frontend_port }}"
+    host: 0.0.0.0
+    delay: 2
+    timeout: 30

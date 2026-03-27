@@ -1,0 +1,38 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Restart kube-apiserver
+  ansible.builtin.shell: |
+    systemctl restart kube-apiserver
+    sleep 2
+    systemctl is-active kube-apiserver
+  become: true
+  register: restart_apiserver
+  retries: 3
+  delay: 5
+  until: restart_apiserver.rc == 0
+
+- name: Restart kube-controller-manager
+  ansible.builtin.shell: |
+    systemctl restart kube-controller-manager
+    sleep 2
+    systemctl is-active kube-controller-manager
+  become: true
+  register: restart_controller
+  retries: 3
+  delay: 5
+  until: restart_controller.rc == 0
+
+- name: Restart kube-scheduler
+  ansible.builtin.shell: |
+    systemctl restart kube-scheduler
+    sleep 2
+    systemctl is-active kube-scheduler
+  become: true
+  register: restart_scheduler
+  retries: 3
+  delay: 5
+  until: restart_scheduler.rc == 0

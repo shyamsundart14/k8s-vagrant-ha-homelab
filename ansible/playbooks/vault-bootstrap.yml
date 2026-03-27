@@ -1,0 +1,21 @@
+---
+# =============================================================================
+# Vault Bootstrap Playbook (standalone)
+# =============================================================================
+# Usage:
+#   ansible-playbook -i inventory/homelab.yml playbooks/vault-bootstrap.yml
+
+- name: Bootstrap HashiCorp Vault
+  hosts: vault_servers
+  gather_facts: true
+
+  roles:
+    - ../roles/vault-bootstrap
+
+  post_tasks:
+    - name: Summary
+      ansible.builtin.debug:
+        msg: |
+          Vault Bootstrap Complete!
+          Address: http://{{ inventory_hostname }}:8200
+          Credentials: ansible/.vault-credentials/

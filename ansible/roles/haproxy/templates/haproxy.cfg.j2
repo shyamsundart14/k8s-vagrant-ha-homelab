@@ -1,0 +1,45 @@
+#---------------------------------------------------------------------
+# HAProxy configuration for K8s API Server Load Balancing
+#---------------------------------------------------------------------
+
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    daemon
+    maxconn 4096
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    timeout connect 5s
+    timeout client  30s
+    timeout server  30s
+    retries 3
+
+#---------------------------------------------------------------------
+# K8s API Server Frontend
+#---------------------------------------------------------------------
+frontend k8s_apiserver
+    bind *:{{ apiserver_frontend_port }}
+    default_backend k8s_apiserver_backend
+
+#---------------------------------------------------------------------
+# K8s API Server Backend (round-robin across masters)
+#---------------------------------------------------------------------
+backend k8s_apiserver_backend
+    option tcp-check
+{% for node in master_nodes %}
+    server {{ node.name }} {{ node.ip }}:{{ apiserver_backend_port }} check inter 5s fall 3 rise 2
+{% endfor %}
+
+#---------------------------------------------------------------------
+# HAProxy Stats (optional - accessible at http://haproxy:8404/stats)
+#---------------------------------------------------------------------
+frontend stats
+    bind *:{{ stats_port }}
+    mode http
+    stats enable
+    stats uri /stats
+    stats refresh 10s

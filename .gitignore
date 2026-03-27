@@ -1,0 +1,17 @@
+# Generated files
+images/
+iso/
+k8s-binaries/
+
+# Vagrant
+.vagrant/
+
+# Vault credentials
+.vault-credentials/
+
+# Ansible cache
+ansible/fact_cache/
+*.retry
+
+# macOS
+.DS_Store
