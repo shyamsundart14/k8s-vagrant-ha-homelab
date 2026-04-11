@@ -17,6 +17,7 @@ ExecStart=/usr/local/bin/kube-apiserver \
   --client-ca-file={{ k8s_cert_dir }}/ca.crt \
   --enable-admission-plugins=NodeRestriction \
   --enable-bootstrap-token-auth=true \
+  --encryption-provider-config={{ k8s_config_dir }}/encryption-config.yaml \
   --etcd-cafile={{ k8s_cert_dir }}/etcd/ca.crt \
   --etcd-certfile={{ k8s_cert_dir }}/apiserver-etcd-client.crt \
   --etcd-keyfile={{ k8s_cert_dir }}/apiserver-etcd-client.key \

@@ -470,6 +470,16 @@
       ansible.builtin.debug:
         msg: "{{ haproxy_result.stdout_lines[-3:] }}"
 
+    # --- Step 3.5: Store etcd encryption key in Vault ---
+    - name: "Step 3.5: Run vault-etcd-encryption-key.yml on jump"
+      ansible.builtin.shell: |
+        {{ playbook_cmd }} playbooks/vault-etcd-encryption-key.yml
+      register: enc_key_result
+
+    - name: Display encryption key result
+      ansible.builtin.debug:
+        msg: "{{ enc_key_result.stdout_lines[-3:] }}"
+
     # --- Step 4: Deploy Control Plane ---
     - name: "Step 4: Run control-plane.yml on jump"
       ansible.builtin.shell: |

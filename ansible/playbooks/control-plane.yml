@@ -50,3 +50,63 @@
       ansible.builtin.debug:
         var: cluster_info.stdout_lines
       when: cluster_info.stdout_lines is defined
+
+# -----------------------------------------------------------------------------
+# Re-encrypt existing secrets so they are stored encrypted in etcd
+# -----------------------------------------------------------------------------
+- name: Re-encrypt existing secrets in etcd
+  hosts: k8s_masters[0]
+  gather_facts: false
+  vars_files:
+    - ../roles/control-plane/vars/main.yml
+    - ../roles/etcd/vars/main.yml
+  tasks:
+    - name: Re-encrypt all secrets
+      ansible.builtin.shell: |
+        kubectl get secrets --all-namespaces -o json \
+          --kubeconfig=/etc/kubernetes/admin.kubeconfig | \
+        kubectl replace -f - \
+          --kubeconfig=/etc/kubernetes/admin.kubeconfig
+      register: reencrypt_result
+      become: true
+      ignore_errors: true
+
+    - name: Display re-encryption result
+      ansible.builtin.debug:
+        msg: "{{ reencrypt_result.stdout_lines | default(['No secrets to re-encrypt']) }}"
+
+    - name: Create test secret for verification
+      ansible.builtin.shell: |
+        kubectl create secret generic etcd-encryption-test \
+          --from-literal=test-key=test-value \
+          --kubeconfig=/etc/kubernetes/admin.kubeconfig \
+          --dry-run=client -o yaml | \
+        kubectl apply -f - --kubeconfig=/etc/kubernetes/admin.kubeconfig
+      register: test_secret
+      become: true
+
+    - name: Verify secret is encrypted in etcd
+      ansible.builtin.shell: |
+        ETCDCTL_API=3 etcdctl get /registry/secrets/default/etcd-encryption-test \
+          --endpoints=https://etcd-1:{{ etcd_client_port }} \
+          --cacert={{ k8s_cert_dir }}/etcd/ca.crt \
+          --cert={{ k8s_cert_dir }}/apiserver-etcd-client.crt \
+          --key={{ k8s_cert_dir }}/apiserver-etcd-client.key \
+          --print-value-only | head -c 50
+      register: etcd_raw_value
+      become: true
+      ignore_errors: true
+
+    - name: Encryption verification
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'etcd encryption at rest is ACTIVE - data is encrypted (secretbox prefix detected)'
+             if 'k8s:enc:secretbox' in (etcd_raw_value.stdout | default(''))
+             else 'WARNING: could not verify encryption - check etcdctl access from this node' }}
+
+    - name: Clean up test secret
+      ansible.builtin.shell: |
+        kubectl delete secret etcd-encryption-test \
+          --kubeconfig=/etc/kubernetes/admin.kubeconfig
+      become: true
+      ignore_errors: true

@@ -164,7 +164,7 @@ done
 
 BLOCKED_PORTS=()
 for port in "${REQUIRED_PORTS[@]}"; do
-  if netstat -an 2>/dev/null | grep -qE "\.${port}\b.*LISTEN|\.${port}\b.*ESTABLISHED"; then
+  if netstat -an 2>/dev/null | grep -qE "\.${port}\b.*LISTEN"; then
     BLOCKED_PORTS+=("$port")
   fi
 done
@@ -180,7 +180,7 @@ if [[ ${#BLOCKED_PORTS[@]} -gt 0 ]]; then
   # Re-check
   STILL_BLOCKED=()
   for port in "${BLOCKED_PORTS[@]}"; do
-    if netstat -an 2>/dev/null | grep -qE "\.${port}\b.*LISTEN|\.${port}\b.*ESTABLISHED"; then
+    if netstat -an 2>/dev/null | grep -qE "\.${port}\b.*LISTEN"; then
       STILL_BLOCKED+=("$port")
     fi
   done
@@ -577,6 +577,16 @@ if (( FROM_STEP <= 10 )); then
   fi
 
   step_end "etcd + HAProxy"
+fi
+
+# =============================================================================
+# Step 10.5: Store etcd encryption key in Vault
+# =============================================================================
+if (( FROM_STEP <= 10 )); then
+  header "Step 10.5/14: Store etcd encryption key in Vault"
+  step_start
+  jump_playbook "vault-etcd-encryption-key.yml"
+  step_end "etcd encryption key"
 fi
 
 # =============================================================================

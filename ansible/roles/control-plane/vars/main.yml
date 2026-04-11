@@ -33,3 +33,7 @@ scheduler_port: 10259
 
 # HAProxy VIP for HA apiserver access
 haproxy_ip: "{{ network_prefix }}.10"
+
+# Vault connection (for fetching etcd encryption key)
+vault_addr: "http://vault:8200"
+vault_token: "{{ lookup('env', 'VAULT_TOKEN') | default(lookup('file', playbook_dir + '/../.vault-credentials/vault-init.json') | from_json | json_query('root_token'), true) }}"
